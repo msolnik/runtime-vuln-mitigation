@@ -1,0 +1,149 @@
+# Claude Code Devcontainer
+# Based on Microsoft devcontainer image for better devcontainer integration
+FROM ghcr.io/astral-sh/uv:0.10@sha256:10902f58a1606787602f303954cea099626a4adb02acbac4c69920fe9d278f82 AS uv
+FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04
+
+ARG TZ
+ENV TZ="$TZ"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Install additional system packages (base image already includes git, curl, sudo, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  # Sandboxing support for Claude Code
+  bubblewrap \
+  socat \
+  # Modern CLI tools
+  fd-find \
+  ripgrep \
+  tmux \
+  zsh \
+  # Build tools
+  build-essential \
+  cmake \
+  pkg-config \
+  clang \
+  llvm \
+  llvm-dev \
+  binutils-dev \
+  # Development libraries (headers)
+  libelf-dev \
+  zlib1g-dev \
+  libboost-all-dev \
+  libyaml-cpp-dev \
+  # Utilities
+  jq \
+  nano \
+  unzip \
+  vim \
+  # Network tools (for security testing)
+  dnsutils \
+  ipset \
+  iptables \
+  iproute2 \
+  # Common runtime libraries
+  libelf1 \
+  zlib1g \
+  libzstd1 \
+  libstdc++6 \
+  libgcc-s1 \
+  # Common target dependencies
+  libpcre3 \
+  libpcre2-8-0 \
+  libssl3 \
+  libxml2 \
+  libcurl4 \
+  libevent-2.1-7 \
+  libsqlite3-0 \
+  libjemalloc2 \
+  # Network and process tools
+  curl \
+  netcat-openbsd \
+  procps \
+  psmisc \
+  # Misc
+  ca-certificates \
+  coreutils \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install git-delta
+# renovate: datasource=github-releases depName=dandavison/delta
+ARG GIT_DELTA_VERSION=0.18.2
+RUN ARCH=$(dpkg --print-architecture) && \
+  curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb && \
+  dpkg -i /tmp/git-delta.deb && \
+  rm /tmp/git-delta.deb
+
+# Install uv (Python package manager) via multi-stage copy
+COPY --from=uv /uv /usr/local/bin/uv
+
+# Build and install bpftime (userspace eBPF runtime)
+# Build deps (cmake, clang, llvm, libelf-dev, zlib1g-dev, binutils-dev,
+# libboost-all-dev, libyaml-cpp-dev) are installed in the apt layer above.
+RUN git clone --recurse-submodules https://github.com/eunomia-bpf/bpftime /tmp/bpftime && \
+  cd /tmp/bpftime && \
+  git submodule update --recursive --remote third_party/bpftool/ && \
+  make release JOBS=$(nproc) && \
+  mv /root/.bpftime/* /usr/local/bin/ && \
+  cp -r /tmp/bpftime/third_party/bpftool/src/bootstrap /usr/local/bpftool && \
+  rm -rf /tmp/bpftime /root/.bpftime
+
+# Install fzf from GitHub releases (newer than apt, includes built-in shell integration)
+# renovate: datasource=github-releases depName=junegunn/fzf
+ARG FZF_VERSION=0.70.0
+RUN ARCH=$(dpkg --print-architecture) && \
+  case "${ARCH}" in \
+    amd64) FZF_ARCH="linux_amd64" ;; \
+    arm64) FZF_ARCH="linux_arm64" ;; \
+    *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+  esac && \
+  curl -fsSL "https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-${FZF_ARCH}.tar.gz" | tar -xz -C /usr/local/bin
+
+# Create directories and set ownership (combined for fewer layers)
+RUN mkdir -p /commandhistory /workspace /home/vscode/.claude /opt && \
+  touch /commandhistory/.bash_history && \
+  touch /commandhistory/.zsh_history && \
+  chown -R vscode:vscode /commandhistory /workspace /home/vscode/.claude /opt
+
+# Set environment variables
+ENV DEVCONTAINER=true
+ENV SHELL=/bin/zsh
+ENV EDITOR=nano
+ENV VISUAL=nano
+
+WORKDIR /workspace
+
+# Switch to non-root user for remaining setup
+USER vscode
+
+# Set PATH early so claude and other user-installed binaries are available
+ENV PATH="/home/vscode/.local/bin:$PATH"
+
+# Install Claude Code natively with marketplace plugins
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+  claude plugin marketplace add anthropics/skills && \
+  claude plugin marketplace add trailofbits/skills && \
+  claude plugin marketplace add trailofbits/skills-curated
+
+# Install Python 3.13 via uv (fast binary download, not source compilation)
+RUN uv python install 3.13 --default
+
+# Install ast-grep (AST-based code search)
+RUN uv tool install ast-grep-cli
+
+# Install Oh My Zsh
+# renovate: datasource=github-releases depName=deluan/zsh-in-docker
+ARG ZSH_IN_DOCKER_VERSION=1.2.1
+RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
+  -p git \
+  -t lukerandall \
+  -x
+
+# Copy zsh configuration
+COPY --chown=vscode:vscode .zshrc /home/vscode/.zshrc.custom
+
+# Append custom zshrc to the main one
+RUN echo 'source ~/.zshrc.custom' >> /home/vscode/.zshrc
+
+# Copy post_install script
+COPY --chown=vscode:vscode post_install.py /opt/post_install.py
