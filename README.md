@@ -1,22 +1,32 @@
 # msolnik-tools
 
-A local [Claude Code plugin marketplace](https://docs.claude.com/en/docs/claude-code/plugins) that ships one plugin — **[`runtime-vuln-mitigation`](plugins/runtime-vuln-mitigation/)** — together with a devcontainer that pre-builds the entire [bpftime](https://github.com/eunomia-bpf/bpftime) userspace-eBPF toolchain it depends on.
+A local [Claude Code plugin marketplace](https://docs.claude.com/en/docs/claude-code/plugins) that ships one plugin — [`runtime-vuln-mitigation`](plugins/runtime-vuln-mitigation/) — together with a devcontainer that pre-builds the entire [bpftime](https://github.com/eunomia-bpf/bpftime) userspace-eBPF toolchain it depends on.
 
 The plugin turns a **userspace CVE or bug write-up** into a **tested bpftime runtime mitigation** (a "virtual patch"): it researches the flaw, reproduces it with a proof-of-concept, authors an eBPF program that neutralizes it in-process, and verifies the exploit is blocked without breaking the app — end to end, autonomously.
 
 > Virtual patch = a hook injected into the running process (via `LD_PRELOAD` or Frida) that enforces the same invariant the upstream fix adds, *without* recompiling or restarting the target. It is a **mitigation**, not a replacement for the upstream fix.
 
+> **Testing status:** This is a prototype. It has been exercised end-to-end **primarily** against a single target — **nginx / [CVE-2026-42945](docs/example-cve-2026-42945.md)** ("rift"). Other CVEs, bug classes, and targets are expected to work but are much less exercised; treat anything beyond that primary case as experimental.
+
+
+
 ## What's in this repo
 
-| Path | Purpose |
-|------|---------|
-| [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) | Marketplace manifest (`msolnik-tools`) listing the plugin |
-| [`plugins/runtime-vuln-mitigation/`](plugins/runtime-vuln-mitigation/) | The plugin — see its [README](plugins/runtime-vuln-mitigation/README.md) |
-| [`.devcontainer/`](.devcontainer/) | Devcontainer that builds & installs the bpftime toolchain — [full setup doc](docs/devcontainer.md) |
-| `bpftime/` | Upstream bpftime source, vendored for reference (not required at runtime) |
-| `work/<CVE-ID>/` | Where the plugin writes all its artifacts (git-ignored) |
+
+| Path                                                                   | Purpose                                                                                            |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json)   | Marketplace manifest (`msolnik-tools`) listing the plugin                                          |
+| [`plugins/runtime-vuln-mitigation/`](plugins/runtime-vuln-mitigation/) | The plugin — see its [README](plugins/runtime-vuln-mitigation/README.md)                           |
+| [`.devcontainer/`](.devcontainer/)                                     | Devcontainer that builds & installs the bpftime toolchain — [full setup doc](docs/devcontainer.md) |
+| `bpftime/`                                                             | Upstream bpftime source, vendored for reference (not required at runtime)                          |
+| `work/<CVE-ID>/`                                                       | Where the plugin writes all its artifacts (git-ignored)                                            |
+
+
+
 
 ## Quick start
+
+
 
 ### 1. Bring up the devcontainer
 
@@ -47,12 +57,14 @@ From inside a Claude Code session in this repo:
 /plugin install runtime-vuln-mitigation@msolnik-tools
 ```
 
+
+
 ### 3. Use it
 
 Give Claude a CVE id or a userspace bug write-up:
 
 ```
-Build a bpftime virtual patch for CVE-2019-12735.
+Build a bpftime virtual patch for CVE-2026-42945.
 ```
 
 The plugin runs the 6-phase pipeline and drops every artifact — research, PoC, patch, verification, and a `REPORT.md` — under `work/<CVE-ID>/`.
@@ -61,6 +73,3 @@ See the [plugin README](plugins/runtime-vuln-mitigation/README.md) for the pipel
 
 For a step-by-step run, see the worked example: [docs/example-cve-2026-42945.md](docs/example-cve-2026-42945.md).
 
-## License / status
-
-bpftime is pre-1.0; the patches this plugin produces are mitigations coupled to a target's binary layout. Treat every generated patch's documented assumptions and residual risk as load-bearing, and prefer the upstream fix as the durable remedy.
