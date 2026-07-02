@@ -1,0 +1,61 @@
+# msolnik-tools
+
+A local [Claude Code plugin marketplace](https://docs.claude.com/en/docs/claude-code/plugins) that ships one plugin — **[`runtime-vuln-mitigation`](plugins/runtime-vuln-mitigation/)** — together with a devcontainer that pre-builds the entire [bpftime](https://github.com/eunomia-bpf/bpftime) userspace-eBPF toolchain it depends on.
+
+The plugin turns a **userspace CVE or bug write-up** into a **tested bpftime runtime mitigation** (a "virtual patch"): it researches the flaw, reproduces it with a proof-of-concept, authors an eBPF program that neutralizes it in-process, and verifies the exploit is blocked without breaking the app — end to end, autonomously.
+
+> Virtual patch = a hook injected into the running process (via `LD_PRELOAD` or Frida) that enforces the same invariant the upstream fix adds, *without* recompiling or restarting the target. It is a **mitigation**, not a replacement for the upstream fix.
+
+## What's in this repo
+
+| Path | Purpose |
+|------|---------|
+| [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) | Marketplace manifest (`msolnik-tools`) listing the plugin |
+| [`plugins/runtime-vuln-mitigation/`](plugins/runtime-vuln-mitigation/) | The plugin — see its [README](plugins/runtime-vuln-mitigation/README.md) |
+| [`.devcontainer/`](.devcontainer/) | Devcontainer that builds & installs the bpftime toolchain — [full setup doc](docs/devcontainer.md) |
+| `bpftime/` | Upstream bpftime source, vendored for reference (not required at runtime) |
+| `work/<CVE-ID>/` | Where the plugin writes all its artifacts (git-ignored) |
+
+## Quick start
+
+### 1. Open the devcontainer
+
+The plugin runs its whole pipeline (build, PoC, deploy, verify) *inside* a container that already has the toolchain. Open this repo in VS Code and **Reopen in Container**, or use the devcontainer CLI:
+
+```sh
+devcontainer up --workspace-folder .
+```
+
+The container is launched with `--cap-add=NET_ADMIN --cap-add=NET_RAW` (needed for server/daemon targets) and installs, into fixed locations the plugin relies on (full breakdown in [docs/devcontainer.md](docs/devcontainer.md)):
+
+- `bpftime`, `bpftimetool`, `libbpftime-*.so` in `/usr/local/bin`
+- `bpftool` + prebuilt libbpf (`include/`, `libbpf.a`) under `/usr/local/bpftool/`
+- `clang` / `llvm`, and `dwarves` (`pahole`, for struct-field offsets)
+- kernel BTF at `/sys/kernel/btf/vmlinux` (used to generate `vmlinux.h`)
+
+No bpftime *source tree* is needed at runtime — the plugin uses the installed binaries and prebuilt libbpf.
+
+### 2. Install the plugin
+
+From inside a Claude Code session in this repo:
+
+```
+/plugin marketplace add .
+/plugin install runtime-vuln-mitigation@msolnik-tools
+```
+
+### 3. Use it
+
+Give Claude a CVE id or a userspace bug write-up:
+
+```
+Build a bpftime virtual patch for CVE-2019-12735.
+```
+
+The plugin runs the 6-phase pipeline and drops every artifact — research, PoC, patch, verification, and a `REPORT.md` — under `work/<CVE-ID>/`.
+
+See the [plugin README](plugins/runtime-vuln-mitigation/README.md) for the pipeline, capabilities, and scope (what it does **not** do — e.g. kernel-space CVEs).
+
+## License / status
+
+bpftime is pre-1.0; the patches this plugin produces are mitigations coupled to a target's binary layout. Treat every generated patch's documented assumptions and residual risk as load-bearing, and prefer the upstream fix as the durable remedy.

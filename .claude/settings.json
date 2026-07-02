@@ -1,6 +1,6 @@
 {
   "extraKnownMarketplaces": {
-    "bpftime-local": {
+    "msolnik-tools": {
       "source": {
         "source": "directory",
         "path": "."
@@ -8,6 +8,6 @@
     }
   },
   "enabledPlugins": {
-    "bpftime-cve-patch@bpftime-local": true
+    "runtime-vuln-mitigation@msolnik-tools": true
   }
 }

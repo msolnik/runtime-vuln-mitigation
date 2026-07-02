@@ -1,0 +1,46 @@
+# runtime-vuln-mitigation templates
+
+Copy-and-fill scaffolds for the pipeline. Copy into `work/<CVE-ID>/` (mirrors the
+Working Directory Layout in SKILL.md) and fill the `TODO`s from research. The
+`patch/` build + deploy was verified end-to-end on **aarch64** and **x86_64**.
+
+| Template | → work dir | Phase | Fill in |
+|----------|-----------|-------|---------|
+| `research/findings.md` | `research/findings.md` | 1 | advisory data, fixing commit, required config |
+| `research/root-cause.md` | `research/root-cause.md` | 2 | sink, invariant, built-binary path |
+| `poc/exploit.py` | `poc/exploit.py` | 3→5 | **THE PoC (single source of truth):** MECHANISM, VARIANTS registry, payload shape, delivery. `gen`/`send`/`variants`/`explain`. Reused by Phase 4 + 5 — never re-implemented. |
+| `poc/run.sh` + `run_n.sh` | `poc/` | 3/5 | MODE, TARGET, exact sanitizer class / sentinel — drives `exploit.py`; `run_n.sh`/`--variant` forwarded |
+| `poc/run_server.sh` | `poc/` | 3/5 | server/daemon oracle: START_SERVER hook; delivery via `exploit.py send` (raw socket, not curl) |
+| `poc/target.conf` + `setup.sh` | `poc/` | 3 | config/state that enables the vuln path (the ONE thing mined from public PoCs) |
+| `patch/patch.bpf.c` | `patch/patch.bpf.c` | 4 | technique, arg signature, invariant |
+| `patch/patch_loader.c` | `patch/patch_loader.c` | 4 | `TARGET_BINARY` / `TARGET_FUNC` |
+| `patch/attach_override.h`,`ufunc.bpf.h`,`Makefile`,`deploy.sh` | `patch/` | 4 | (use as-is) |
+| `patch/find_offsets.sh` | `patch/` | 4 | (use as-is) — pahole struct-field offset/bit for technique-3 memory-write patches |
+| `verify/verify_matrix.sh` + `verify_matrix_server.sh` + `benign_suite.sh` | `verify/` | 5 | benign workload, start hooks (server variant for daemon targets) |
+| `report/REPORT.md` | `REPORT.md` | 6 | final write-up |
+
+## Patch build + deploy (verified)
+
+```sh
+cd work/<CVE>/patch
+make                       # -> patch.bpf.o, patch.skel.h, patch_loader (arch auto-detected)
+./deploy.sh preload ../target/<binary> [args]   # bpftime load + start; clean shm first
+# or, live, into an already-running pid:
+./deploy.sh attach <pid>   # needs sudo (ptrace)
+./deploy.sh clean          # kill loaders + wipe /dev/shm/bpftime_maps_shm
+```
+
+## Non-obvious things that will bite you (verified the hard way)
+
+- **Clean shm before every deploy.** bpftime shares one `/dev/shm/bpftime_maps_shm`;
+  a stale loader/agent makes the override attach fail with `EBADF`. `deploy.sh`
+  and `verify_matrix.sh` clean it; do the same in any manual run.
+- **`bpf_prog_attach` returns a POSITIVE fd on success under bpftime** (not 0).
+  Only a negative result is a failure — `attach_override.h` normalizes this.
+- **The libbpf version does NOT matter** — the container's prebuilt
+  `/usr/local/bpftool/libbpf/libbpf.a` works (verified). An earlier "must use
+  vendored libbpf" was a misdiagnosis of the positive-fd return bug above.
+- **aarch64: use uprobe-override, not a syscall filter.** bpftime's
+  syscall-tracepoint hooking is x86_64-only (aarch64 trampoline is a stub).
+- **You cannot rewrite scalar args** — only skip/replace the call
+  (`bpf_override_return`) or mutate pointed-to memory (`bpf_probe_write_user`).

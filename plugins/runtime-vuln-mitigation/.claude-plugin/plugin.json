@@ -1,0 +1,9 @@
+{
+  "name": "runtime-vuln-mitigation",
+  "description": "Turn a userspace CVE or bug write-up into a tested bpftime runtime mitigation (virtual patch): research the flaw, reproduce it with a PoC, author an eBPF program that neutralizes it in-process, and verify the exploit is blocked without breaking the app.",
+  "version": "1.0.0",
+  "keywords": ["cve", "vulnerability", "virtual-patch", "bpftime", "ebpf", "mitigation", "hotpatch", "userspace-security"],
+  "author": {
+    "name": "Mat"
+  }
+}

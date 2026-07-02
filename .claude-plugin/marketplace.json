@@ -1,12 +1,12 @@
 {
-  "name": "bpftime-local",
+  "name": "msolnik-tools",
   "owner": {
     "name": "Mat"
   },
   "plugins": [
     {
-      "name": "bpftime-cve-patch",
-      "source": "./plugins/bpftime-cve-patch",
+      "name": "runtime-vuln-mitigation",
+      "source": "./plugins/runtime-vuln-mitigation",
       "description": "Build and verify bpftime runtime mitigations (virtual patches) for userspace CVEs, end to end.",
       "version": "1.0.0"
     }

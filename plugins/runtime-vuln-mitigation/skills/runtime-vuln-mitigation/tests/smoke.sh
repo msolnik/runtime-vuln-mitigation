@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Template smoke test for the runtime-vuln-mitigation skill — fast, dependency-light guardrails so a
+# template edit can't silently break the build/plumbing. Run from anywhere:
+#     bash plugins/runtime-vuln-mitigation/skills/runtime-vuln-mitigation/tests/smoke.sh
+# Exit 0 = all green. Covers: shell syntax, exploit.py subcommands, patch builds across
+# technique×mode, and the PATCH_MODE observe≠enforce object + typo-safety.
+# The HEAVY end-to-end (bpftime attach, observe-detect, enforce-neutralize, A/B/C matrix) is the
+# synthetic non-crashing harness + a real-CVE run — this smoke test is the cheap pre-flight.
+set -u
+SKILL="$(cd "$(dirname "$0")/.." && pwd)"
+T="$SKILL/templates"
+pass=0 fail=0 skip=0
+ok(){ echo "  ok   $*"; pass=$((pass+1)); }
+no(){ echo "  FAIL $*"; fail=$((fail+1)); }
+sk(){ echo "  skip $*"; skip=$((skip+1)); }
+
+echo "== 1. shell scripts parse (bash -n) =="
+while IFS= read -r f; do bash -n "$f" 2>/dev/null && ok "${f#$SKILL/}" || no "${f#$SKILL/}"; done \
+	< <(find "$T" -name '*.sh')
+
+echo "== 2. exploit.py compiles + subcommands work =="
+python3 -m py_compile "$T/poc/exploit.py" 2>/dev/null && ok "py_compile" || no "py_compile"
+vars="$(python3 "$T/poc/exploit.py" variants 2>/dev/null)"
+if [ -n "$vars" ] && ! printf '%s' "$vars" | grep -qx benign; then ok "variants (excludes benign control)"; else no "variants list"; fi
+python3 "$T/poc/exploit.py" gen --variant canonical --filler 2 --count 3 >/dev/null 2>&1 && ok "gen" || no "gen"
+python3 "$T/poc/exploit.py" explain 2>/dev/null | grep -q . && ok "explain" || no "explain"
+if python3 "$T/poc/exploit.py" gen --variant nope >/dev/null 2>&1; then no "gen rejects bad variant"; else ok "gen rejects bad variant"; fi
+
+echo "== 3. patch builds across technique × mode (needs clang/bpftool/BTF) =="
+if ! { command -v clang >/dev/null && [ -x /usr/local/bpftool/bpftool ] && [ -r /sys/kernel/btf/vmlinux ]; }; then
+	sk "patch build (toolchain/BTF missing — run in the devcontainer)"
+else
+	work="$(mktemp -d)"; cp -a "$T/patch/." "$work/"; here="$PWD"; cd "$work" || exit 3
+	for combo in "PATCH_TECHNIQUE=1 PATCH_MODE=enforce" "PATCH_TECHNIQUE=3 PATCH_MODE=observe" \
+	             "PATCH_TECHNIQUE=3 PATCH_MODE=enforce" "PATCH_TECHNIQUE=5 PATCH_MODE=observe" \
+	             "PATCH_TECHNIQUE=5 PATCH_MODE=enforce"; do
+		make clean >/dev/null 2>&1
+		if out="$(make $combo 2>&1)" && [ -x patch_loader ] && [ -f .output/patch.bpf.o ] \
+		   && [ "$(printf '%s' "$out" | grep -ciE 'warning|error')" -eq 0 ]; then
+			ok "build [$combo] (-Wall clean)"
+		else no "build [$combo]"; fi
+	done
+	# PATCH_MODE plumbing: observe must differ from enforce for a REACHABLE body (technique 3).
+	make clean >/dev/null 2>&1; make PATCH_TECHNIQUE=3 PATCH_MODE=enforce >/dev/null 2>&1; cp .output/patch.bpf.o e.o
+	make clean >/dev/null 2>&1; make PATCH_TECHNIQUE=3 PATCH_MODE=observe >/dev/null 2>&1; cp .output/patch.bpf.o o.o
+	if cmp -s e.o o.o; then no "PATCH_MODE had no effect (observe==enforce object)"; else ok "observe≠enforce object (tech3)"; fi
+	# Typo-safety: a bad PATCH_MODE must ERROR, not silently enforce.
+	make clean >/dev/null 2>&1
+	if make PATCH_MODE=observ >/dev/null 2>&1; then no "bad PATCH_MODE did not error"; else ok "bad PATCH_MODE errors (fail-safe)"; fi
+	cd "$here" || true; rm -rf "$work"
+fi
+
+echo
+echo "== smoke: $pass ok, $fail FAIL, $skip skip =="
+[ "$fail" -eq 0 ] || exit 1

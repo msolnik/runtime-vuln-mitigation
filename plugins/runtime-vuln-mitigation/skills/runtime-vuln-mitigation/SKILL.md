@@ -1,0 +1,559 @@
+---
+name: runtime-vuln-mitigation
+description: >-
+  Use when a user gives a CVE id or a vulnerability write-up for a userspace
+  application or library and wants a working, tested bpftime runtime mitigation
+  (a "virtual patch") built and verified end to end. Trigger keywords: CVE,
+  vulnerability, bug write-up, virtual patch, runtime patch, hotpatch,
+  mitigation, bpftime, userspace exploit. NOT for kernel-space CVEs, NOT for
+  writing upstream source-code fixes or pull requests, and NOT for general eBPF
+  tracing or observability.
+allowed-tools: Bash Read Write Edit Grep WebFetch WebSearch AskUserQuestion Task TaskCreate TaskUpdate TaskList
+---
+
+# Building Verified bpftime Patches for Userspace CVEs
+
+Turn a CVE id or bug write-up into a **tested bpftime virtual patch**: research the
+flaw, reproduce it with a proof-of-concept, author an eBPF program that neutralizes
+it at runtime, and prove the patch blocks the exploit without breaking the app. The
+whole pipeline runs autonomously inside this devcontainer, which already ships the
+full bpftime toolchain.
+
+## Essential Principles
+
+1. **A patch you cannot reproduce is unfalsifiable.** You must have a PoC that
+   objectively fails (exploited) on the unpatched app *before* you write a patch.
+   Without a reproducing PoC and a passing negative control, you cannot prove the
+   patch does anything. This is the #1 failure mode — never skip it.
+2. **Patch the root-cause invariant, not the PoC bytes.** A filter that matches the
+   literal exploit input is worthless — trivial variants bypass it. Derive the guard
+   from the condition the upstream fix adds, and prefer calling the app's own
+   validators (`ufunc`) over re-matching payloads.
+3. **Derive the exploit from the fix diff + source — not from a public PoC.** Build the PoC
+   from the *mechanism* the upstream fix guards (how does the guarded quantity actually get
+   violated?), aiming for the MINIMAL input that trips the bug. Consult public PoCs/write-ups
+   **only** to learn the required non-default *configuration/reachability* (what module,
+   directive, or mode enables the sink) — never copy one as the exploit body. A borrowed
+   heap-groom RCE is bigger, less deterministic, and teaches you nothing about the invariant.
+4. **Write the PoC ONCE, parametrized — one `exploit.py`, reused every phase.** The Phase-3
+   `poc/exploit.py` is the single source of truth for payload generation *and* delivery, with a
+   built-in **variant registry** for anti-overfitting. Phase 4 (patch dev) and Phase 5
+   (verification + the variant sweep) **reuse it unchanged** — they never write a second payload
+   generator or request sender. (Real regression: a prior run grew `make_input.py` +
+   `gen_payload.py` + `send_req.py` for one bug because the payload wasn't parametrized and the
+   sender used curl, which URL-encodes the bytes and masked the trigger.)
+5. **bpftime is userspace and in-process — it is not kernel eBPF.** The program runs
+   inside the target's address space. A patch CAN skip/replace a call (`bpf_override_return`),
+   mutate memory a pointer arg points to (`bpf_probe_write_user`), and call the app's
+   own functions (`ufunc`); it CANNOT rewrite scalar/register argument values. Design
+   the patch around what is actually possible.
+6. **Every claim needs machine-checkable evidence.** "Looks blocked" is not blocked.
+   Reuse one exploit-success oracle across the whole verification matrix, and assert
+   the eBPF program actually attached — a silent attach failure leaves the app exposed
+   while benign tests still pass.
+7. **Treat the patch as a mitigation, not a fix.** bpftime is pre-1.0 and patches are
+   coupled to the target's binary layout/offsets. Document those assumptions and the
+   residual risk; recommend the upstream fix as the durable remedy.
+
+## When to Use
+
+- The user supplies a CVE id (e.g. `CVE-2019-12735`) or a bug write-up for a
+  **userspace** program or library and wants a runtime mitigation.
+- The vulnerable code path can be hooked at a userspace function or at a syscall the
+  target makes (memory-corruption, logic, type-confusion, injection, traversal, DoS).
+- You need the mitigation *verified* — exploit blocked AND benign behavior intact — not
+  just written.
+- You want an isolated, reproducible artifact set (research, PoC, patch, verification,
+  report) for a single vulnerability.
+
+## When NOT to Use
+
+- **Kernel-space CVEs** — bpftime patches userspace processes, not the kernel. Use a
+  kernel eBPF/LSM approach or a real kernel patch instead.
+- **Producing the upstream source fix / a PR** — this skill builds a runtime hook, not
+  a code change to the project. Use normal development for that.
+- **General eBPF tracing, profiling, or observability** — use bpftime/bpftrace directly;
+  this skill is specifically about neutralizing a known vulnerability.
+- **Vulnerability discovery / fuzzing an unknown target** — this skill starts from a
+  *known* CVE or write-up, not from scratch. Use a fuzzing skill to find bugs first.
+
+## How a bpftime Patch Neutralizes a Vulnerability
+
+bpftime injects an eBPF program into the target process (via `LD_PRELOAD` at start or
+Frida injection into a running PID) so the program runs **in-process**, on the target's
+own function calls and syscalls. The patch hooks the narrowest point where the
+vulnerability's precondition is decidable, checks the invariant, and short-circuits the
+dangerous path (the same shape as bpftime's own Redis/Vim hotpatch demos).
+
+```
+        target process (unmodified binary)
+   call vuln_fn(args) ──▶ [bpftime uprobe/override hook]
+                              │  read args + target memory (in-process)
+                              │  optionally call app's own validator via ufunc
+                              ├─ invariant holds  ──▶ run original function (benign)
+                              └─ invariant violated ─▶ bpf_override_return(safe) — original SKIPPED
+```
+
+**What a patch can and cannot do (design within this):**
+
+| Capability | Mechanism | Notes |
+|-----------|-----------|-------|
+| Skip / short-circuit the call | `bpf_override_return(ctx, rc)` | Original never runs; needs OVERRIDE(1008) or syscall attach |
+| Replace the function entirely | `ureplace` (1009) | Program's return value is always used |
+| Mutate memory an arg points to | `bpf_probe_write_user(dst,src,len)` | In-place memcpy, same address space |
+| Call the app's own functions | `ufunc` (`UFUNC_CALL_NAME_*`) | Reuse real validators (bpftime-specific) |
+| Observe/detect WITHOUT acting | ring-buffer verdict, `PATCH_MODE=observe` | Log-only: detects **non-crashing** corruption + staged rollout; same program flips to enforce |
+| Compute + enforce a bound | technique 5 (override when OOB, or clamp a memory-backed size) | Detect-and-neutralize OOB (silent over-read/over-write) |
+| Rewrite scalar/register arg values | **NOT POSSIBLE** | pt_regs is a copy; no write-back (clamp only a memory-backed size) |
+| Enforce kernel-wide | **NOT POSSIBLE** | Process-scoped; must inject into the target |
+
+## The Pipeline
+
+Run these phases in order. Fragile phases (3 and 4) loop with **bounded retry (max 3
+attempts), then escalate** (see Retry & Escalation Policy). Track phase progress AND the
+Phase 4 `patch_attempt` counter with TaskCreate/TaskUpdate, and read state back with
+TaskList so a mid-loop context compaction does not lose the attempt count.
+
+| Phase | Produces | Runs as |
+|-------|----------|---------|
+| 0 · Intake & Setup | work dir, normalized target id | main agent |
+| 1 · Research | authoritative advisory data + fixing commit | **3 parallel subagents** |
+| 2 · Root-Cause | sink function, bug class, trigger invariant | main agent |
+| 3 · Reproduce (PoC) | `run.sh` where exit 0 = exploited + negative control | **isolated subagent**, loop ≤3 |
+| 4 · Patch | `patch.bpf.c` + loader, attaches cleanly | **isolated subagent**, loop ≤3 |
+| 5 · Verify | A/B/C + control matrix all green | main agent |
+| 6 · Report | `REPORT.md` deliverable | main agent |
+
+## Working Directory Layout
+
+Two roots are involved and MUST NOT be confused:
+
+- **`{baseDir}`** — this skill's own directory (`SKILL.md`, `templates/`, `references/`). When the
+  skill ships as a **plugin** this resolves to `${CLAUDE_PLUGIN_ROOT}/skills/runtime-vuln-mitigation`,
+  i.e. **inside `.claude/plugins/…` and READ-ONLY / shared across projects**. Copy templates *from*
+  it; never write into it.
+- **`work/<CVE-ID>/`** — every artifact this skill generates, created in Phase 0 under the **user's
+  current project directory** (cwd / repo root, e.g. `/workspace/work/<CVE-ID>/`), which the repo
+  git-ignores. **Nothing this skill produces is ever written under `{baseDir}` or any `.claude/`
+  directory.**
+
+Every phase reads and writes known locations under `work/<CVE-ID>/` so the subagents, the negative
+control, and the verification runs all agree on where the target source, binaries, and configs are:
+
+```
+work/<CVE-ID>/
+├── research/
+│   ├── findings.md      # Phase 1: merged research + the fixing-commit diff
+│   └── root-cause.md    # Phase 2: sink file:function, CWE, invariant, required config,
+│                        #          AND the exact path of the built target binary
+├── target/              # Phase 3: checked-out vulnerable SOURCE, built TWICE:
+│   ├── asan/            #   ASan build — PoC reproduction oracle (Phase 3)
+│   └── noasan/          #   non-ASan -g build — patch attach + verify (Phase 4/5; agent LD_PRELOAD clashes with ASan)
+├── poc/
+│   ├── target.conf      # minimal config that ENABLES the vulnerable path (Phase 3 step 2)
+│   ├── setup.sh         # state preconditions (create objects, seed data)
+│   ├── exploit.py       # THE PoC: single source of truth — payload (gen), delivery (send),
+│   │                    #   variant registry (variants), mechanism (explain). Written ONCE in
+│   │                    #   Phase 3; REUSED unchanged by Phase 4 + Phase 5 (never re-implemented).
+│   ├── poc.bin          # generated on demand by `exploit.py gen` (file/CLI targets)
+│   ├── run.sh           # exploit-success oracle: exit 0 = exploited (file/CLI target); drives exploit.py
+│   ├── run_server.sh    # server/daemon oracle: start server, `exploit.py send`, detect worker crash
+│   └── run_n.sh         # N-run consistency wrapper (all-of-N / 0-of-N); forwards --variant
+├── patch/
+│   ├── patch.bpf.c      # the bpftime eBPF virtual patch
+│   ├── patch_loader.c   # libbpf loader (sets TARGET_BINARY/TARGET_FUNC)
+│   ├── attach_override.h# OVERRIDE(1008)/REPLACE(1009) attach helper (bundled)
+│   ├── ufunc.bpf.h      # call the target's own functions by name (bundled)
+│   ├── Makefile         # self-contained build (arch auto-detected)
+│   ├── deploy.sh        # load/start/attach + shm hygiene (Phase 4)
+│   ├── find_offsets.sh  # pahole: struct field offset/bit for technique-3 (state-reset) AND technique-5 (clamp SIZE_OFF) memory writes
+│   └── patch.skel.h     # generated by make
+├── verify/
+│   ├── verify_matrix.sh # A/B/C + control runner (CLI target), cleans shm between cells (Phase 5)
+│   ├── verify_matrix_server.sh # server/daemon variant: bg loader + agent-injected server + FIRED-delta
+│   ├── benign_suite.sh  # Cell C regression/smoke suite (run under poc/target.conf)
+│   └── results.md       # Phase 5: the A/B/C + control matrix results
+│                        # NOTE: NO gen_payload.py / send_req.py / variants/ here — the anti-overfitting
+│                        # sweep drives `poc/exploit.py --variant <each>`; verify OWNS no PoC code.
+└── REPORT.md            # Phase 6 deliverable
+```
+
+**Record the exact target binary path** (e.g. `target/noasan/target_app`) in
+`research/root-cause.md`. The loader's `TARGET_BINARY`/`TARGET_FUNC` (and the Phase 5
+deploy/run commands) MUST reference the same binary the PoC exercised — a patch attached to a
+different build silently protects nothing. (The eBPF program uses a **bare `SEC("uprobe")`**;
+the target is chosen by the loader's override attach, not the SEC string.)
+
+### Phase 0: Intake & Setup
+
+**Entry:** User provided a CVE id or a bug write-up.
+
+**Actions:**
+1. Normalize the identifier: resolve to a CVE id, and record the exact package name and
+   ecosystem (source repo, PyPI/npm/Cargo/OS package). If only a write-up was given,
+   extract the affected product, version, and a candidate CVE/GHSA if one exists.
+2. Confirm the target is **userspace** (a program or library, not the kernel). If it is
+   kernel-space, stop and tell the user this skill does not apply (see When NOT to Use).
+3. Create the working directory `work/<CVE-ID>/` **under the user's current project directory**
+   (the cwd / repo root, e.g. `/workspace/work/<CVE-ID>/`; use the product+date if no CVE id) with
+   the subdirs shown in **Working Directory Layout** above (`research/ target/ poc/ patch/
+   verify/`). **Never create `work/` — or any output — under `{baseDir}` / `${CLAUDE_PLUGIN_ROOT}`
+   or inside a `.claude/` directory**; the skill's files are a read-only, possibly shared plugin
+   install. Copy templates *out of* `{baseDir}/templates/` *into* `work/<CVE-ID>/`.
+4. Verify the self-contained build deps (no bpftime source needed): `bpftime --version`,
+   `clang --version`, `/usr/local/bpftool/bpftool version`, the libbpf headers+lib at
+   `/usr/local/bpftool/libbpf/{include,libbpf.a}`, and kernel BTF at
+   `/sys/kernel/btf/vmlinux` (the Makefile generates `vmlinux.h` from it). If BTF is
+   missing, the target's build must provide a `vmlinux.h` another way.
+
+**Exit:** Work dir exists; target is confirmed userspace; toolchain verified.
+
+### Phase 1: Research (fan-out)
+
+**Entry:** Phase 0 complete.
+
+**Actions:** Dispatch **3 parallel Task subagents** (fixed count — do not spawn one per
+source). Give each the CVE id/product and a structured return format. See
+`references/vulnerability-research.md` for the full source list and queries.
+1. **Advisory subagent** — CVE.org/MITRE, NVD, OSV.dev, GHSA: CWE, CVSS, affected/fixed
+   version ranges, referenced patch links.
+2. **Fix-commit subagent** — distro trackers (Debian/Ubuntu/Red Hat) + upstream repo:
+   converge on the *fixing commit*, fetch the diff, pin the vulnerable version range and
+   (if possible) the introducing commit.
+3. **Reachability/config subagent** — the reachable entry point and, above all, the
+   **required non-default configuration** (config-file directives, build flags/modules,
+   runtime mode, environment, or state preconditions) needed for the vulnerable path to be
+   active. Public PoCs, exploit write-ups, and the regression test/fuzz reproducer committed
+   with the fix are mined **for that config/reachability**, NOT to copy as the exploit — the
+   exploit itself is derived from the fix mechanism in Phase 3 (principle 3).
+
+Give each subagent a structured return (summary; findings as claim/detail/confidence/source;
+the fix commit + diff; affected/fixed versions; trigger; required config). Write the merged
+results to `research/findings.md` with every claim tied to a source. **Verify before trusting:**
+recent-CVE research can be wrong or hallucinated — confirm the fix by fetching the commit's
+`.patch` (or the release diff) directly, and treat 3-subagent convergence as the corroboration bar.
+
+**Exit:** `research/findings.md` records the fixing commit, the diff, affected/fixed
+versions, and at least one candidate trigger. Conflicting version data is reconciled in
+favor of the upstream fix commit.
+
+### Phase 2: Root-Cause Analysis
+
+**Entry:** Phase 1 complete; fixing commit and diff in hand.
+
+**Actions:** (full method in `references/vulnerability-research.md`)
+1. Read the fix diff. The removed/old (pre-image) lines are the vulnerable code; the
+   enclosing function is the **sink**.
+2. Classify the bug from what the patch ADDS (bounds check ⇒ overflow; overflow-safe
+   multiply ⇒ integer overflow; free/NULL-out ⇒ UAF; `..`/realpath ⇒ path traversal;
+   type/tag check ⇒ type confusion; execve-array ⇒ command injection). Map to a CWE.
+3. State the **invariant** the exploit violates — the exact condition the fix guards.
+   This is what the patch will enforce.
+4. Confirm reachability: walk callers from the sink up to an attacker-controlled entry
+   point (Grep for the function name; read callers). Reachability is also gated by
+   **configuration** — a path can be compiled out or off by default; record the build
+   flags / config directives / loaded modules / runtime mode required to enable it.
+
+**Exit:** `research/root-cause.md` names the sink `file:function`, the bug class (CWE),
+the trigger precondition/invariant, the reachable entry point, and any configuration
+required to make the path active.
+
+### Phase 3: Reproduce with a PoC
+
+**Entry:** Phase 2 complete; sink and invariant identified.
+
+**Actions:** Dispatch an **isolated PoC subagent** (keeps heavy build/debug context out of
+the orchestrator), giving it the required configuration/preconditions found in research.
+Full recipe in `references/poc-reproduction.md`; **start from `{baseDir}/templates/poc/`**
+(`run.sh` is a hardened MODE-gated oracle — crash/dos/sentinel/instrument — with `run_n.sh` for N-run
+consistency). **If the corruption is NON-CRASHING** (silent OOB read/write, UAF-no-crash) and no
+sanitizer/sentinel can see it, use `MODE=instrument`: run the target under a bpftime **observe-probe**
+(a technique-5 patch built `PATCH_MODE=observe`) whose `would-block` verdict is the detector — but
+trust it ONLY with the vulnerable-vs-fixed/benign **differential** (see `references/poc-reproduction.md`
+"Grounding a non-crashing oracle"), never letting the probe's own guard define "exploited". For a
+**server/daemon target** (a web server, database, etc.) use `run_server.sh` instead —
+start the server, send the crafted request, detect the WORKER crash / ASan report; the one-shot
+`./target poc.bin` model does not fit.
+
+**Give the subagent** (type `general-purpose`): the exact vulnerable version pin, the required
+config/preconditions plus the sink and bug class from `research/`, and the work dir. Tell it to
+**derive the exploit from the fix diff + source** (principle 3) — public PoCs are for *config only*.
+**Require it to return:** `{asan_bin, noasan_bin, run_sh_mode, sanitizer_class_or_sentinel,
+exploit_py_variants[], reproduces:bool, control_passes:bool, artifact_paths[]}`.
+1. Obtain the EXACT vulnerable version (pinned tag/commit-before-fix, tarball, or pinned
+   package) into `target/`.
+2. **Configure so the vulnerable path is reachable** — apply any non-default build flag,
+   config-file directive, loaded module/plugin, runtime mode, or state precondition the
+   vulnerability requires (default config often leaves the sink unreachable, silently
+   failing the PoC). Check the config in as `poc/target.conf` / recorded build flags, and
+   **verify the feature is actually active** — do not assume it loaded. This is the ONE place a
+   public PoC/write-up is authoritative: mine it for the enabling config, not for the exploit.
+3. Build **two variants** of the same version+config: an **ASan** build (`target/asan/`,
+   `-fsanitize=address,undefined -fno-sanitize-recover=all -g -O1`) for the reproduction oracle,
+   AND a **non-ASan `-g`** build (`target/noasan/`) for patch attach/verify — the bpftime agent's
+   LD_PRELOAD clashes with the ASan runtime, so the patch is verified on the non-ASan binary.
+   Confirm BOTH crash on the malicious input (ASan report; or `MALLOC_CHECK_=3` → SIGABRT on the
+   non-ASan build). (Or plan a valgrind/sentinel/timeout detector for non-memory bugs.)
+4. **Author `poc/exploit.py` — the single PoC driver (principle 4).** Derive the payload from the
+   invariant/mechanism (how the guarded quantity is violated), and populate its **variant
+   registry** with root-cause-equivalent triggers up front (this IS the Phase-5 anti-overfitting
+   sweep — define it now so verification reuses it, never rebuilds it) and its `explain` text with
+   the mechanism write-up. `gen` emits the payload; `send` delivers exact wire bytes over a raw
+   socket (NOT curl — it percent-encodes and can mask the trigger). Do NOT split payload logic
+   across files.
+5. Wire `poc/run.sh` (file/CLI) or `poc/run_server.sh` (server/daemon) to drive `exploit.py`:
+   **exit 0 = exploited**, grepping the SPECIFIC sanitizer class (or sentinel / `timeout` 124).
+   Configure `ASAN_OPTIONS`/`UBSAN_OPTIONS` so detection is not silently recovered. The oracle
+   embeds NO payload bytes — it calls `exploit.py`.
+6. **Negative control (benign input):** the identical harness — same configuration — MUST report
+   not-exploited on **benign input** (`--variant benign`). This proves the oracle keys on the
+   trigger, not on the harness/config. For a crashing or sanitizer-detectable bug this is the
+   whole control: **build only the two variants above (vuln ASan + vuln non-ASan) — do NOT build a
+   third "fixed" version.** The crash oracle already keys on the vulnerability because it greps the
+   SPECIFIC sanitizer class at the sink (e.g. `heap-buffer-overflow` inside the vulnerable
+   function), so a benign-vs-malicious differential on the *same* build is sufficient falsifiability.
+   *(Exception — NON-crashing observe-probe oracle only: when the detector is itself a bpftime
+   observe-probe (`MODE=instrument`, technique 5, no crash/sanitizer signal), it is circular unless
+   it is ALSO silent on a fixed/patched build — see the observe-probe differential in
+   `references/poc-reproduction.md`. That is the one case that still needs a fixed comparison.)*
+
+**Loop (max 3 attempts):** if the PoC does not reliably reproduce (or the negative control
+also fires), re-examine the target configuration (a disabled feature/module is a common
+silent cause), the version pin, build flags, trigger, and detector. After 3 failed
+attempts, **escalate**.
+
+**Exit:** `poc/run.sh` exits 0 on the malicious input across repeated runs and exits non-zero on
+the benign control. (Only the non-crashing observe-probe oracle additionally requires the fixed-build
+differential — see step 6's exception.)
+
+### Phase 4: Author the bpftime Patch
+
+**Entry:** Phase 3 complete; a reliably reproducing PoC exists.
+
+**Actions:** Dispatch an **isolated patch subagent**. Full guide in
+`references/bpftime-patch-cookbook.md`. **Copy `{baseDir}/templates/patch/` into
+`patch/`** — a verified (x86_64 + aarch64) scaffold — and fill the TODOs; do NOT hand-roll
+the build/loader/attach (small rewrites broke the attach in testing).
+
+**Give the subagent** (type `general-purpose`): the `target/noasan/<binary>` path, the sink
+`file:function` + arg signature, the root-cause invariant, the chosen `PATCH_TECHNIQUE`, and (for
+technique 3) the struct/field to write. **It must REUSE `poc/exploit.py` + the Phase-3 oracle to
+check the patch blocks the exploit — it does NOT write any new PoC/payload/sender code** (principle
+4; the exploit is already built and parametrized). **Require it to return:**
+`{built:bool, attached:bool, blocks_poc:bool, patch_paths[], blocker_if_any}`.
+1. Choose the hook: a **uprobe-override** on the sink function (the normal case). Only use a
+   syscall tracepoint if the danger is best expressed as a syscall — and note it is
+   **x86_64-only** (unavailable on aarch64), so on aarch64 always hook the function.
+2. Author `patch/patch.bpf.c` to match the shape of the **upstream fix**:
+   - *Fix skips/guards a call* → `BPF_UPROBE(patch_entry, <args>)` matching the sink signature,
+     evaluate the **root-cause invariant** (call the app's own validator via `ufunc` where
+     possible), and `bpf_override_return()` only when it is violated.
+   - *Fix just RESETS STATE* (a one-line change like `obj->flag = 0;` — clears a flag / fixes a size)
+     → **technique 3**: a *plain* uprobe that writes the field via `bpf_probe_write_user`, with the
+     byte/bit offset from `./find_offsets.sh ../target/noasan/<binary> <struct> <field>` (pahole) on the
+     `-g` binary you built — **never guess offsets** (bitfield read-modify-write and the full recipe
+     are in `references/bpftime-patch-cookbook.md` §4).
+   - *Fix adds a BOUNDS CHECK / the bug is NON-CRASHING OOB* (silent over-read/over-write, index past
+     a length) → **technique 5** (detect-and-neutralize): read the args, **compute** need vs capacity,
+     and `bpf_override_return` when out of bounds (or clamp a *memory-backed* size via
+     `bpf_probe_write_user`). It reads input to decide → a conditional guard (full Phase-5 sweep).
+   Keep the guard tight. Set `TARGET_BINARY`/`TARGET_FUNC` in `patch_loader.c`, and set
+   `PATCH_TECHNIQUE` in the Makefile (default 1 = override; 3 = state-reset; 5 = bounds) —
+   it is passed to BOTH `patch.bpf.c` and `patch_loader.c` so the eBPF side and the attach path
+   agree (1/2/4/5 = override attach, 3 = plain uprobe).
+   **`PATCH_MODE` (observe|enforce)** — the SAME program can run log-only (`make PATCH_MODE=observe`:
+   evaluates the invariant, emits a `would-block` verdict, does NOT act) or enforcing (default). Build
+   `observe` first to **detect a non-crashing bug** (the verdict IS the oracle — MODE=instrument, see
+   Phase 3) and for staged rollout; flip to `enforce` to neutralize. Both emit the rich ring-buffer
+   event (`invariant_id/verdict/observed/bound`) — the instrumentation/tracing.
+3. Build: `make` (or `make PATCH_TECHNIQUE=3`; auto-detects arch; uses the prebuilt libbpf + bpftool).
+4. Deploy against the **non-ASan** build: `./deploy.sh preload ../target/noasan/<binary>` — it **cleans shm first** (a stale
+   loader makes the attach fail with EBADF) and runs `bpftime load` + `start`. **Assert the
+   loader stayed alive** (attach succeeded — bpftime returns a positive fd on success, not 0).
+
+**Loop (max 3 attempts):** if it fails to build, fails the verifier, fails to attach, or
+does not block the PoC, iterate on the hook point, offsets/symbols, invariant logic, and
+**check for stale bpftime shm/loaders** (`./deploy.sh clean`). After 3 failed attempts,
+**escalate**.
+
+**Exit:** The patch builds, attaches successfully, and running `poc/run.sh` against the
+patched target now reports **not exploited**.
+
+### Phase 5: Verify
+
+**Entry:** Phase 4 complete; patch blocks the PoC in a first check.
+
+**Actions:** Run the full matrix with `{baseDir}/templates/verify/verify_matrix.sh` (CLI
+target) — or `verify_matrix_server.sh` for a **server/daemon target** (it backgrounds the
+patch loader, starts the server in the foreground under the agent, and delta-counts the
+ring-buffer `FIRED` events per request). Both clean shm between cells; full protocol in
+`references/patch-verification.md`. **Run all four cells
+against the `target/noasan/` build** (the ASan build was only the Phase-3 reproduction oracle;
+the agent's LD_PRELOAD clashes with ASan). On the non-ASan build the crash oracle is
+signal-based — run under `MALLOC_CHECK_=3` so heap corruption becomes a deterministic SIGABRT.
+Reuse the ONE oracle from `poc/run.sh`/`run_server.sh` across cells A and B (via `run_n.sh N
+all`/`none`). (If you must verify on the ASan build instead, libasan MUST precede the agent in
+`LD_PRELOAD` — `bpftime start` can't control that; use `deploy.sh`'s `EXTRA_PRELOAD`.)
+
+| Cell | Setup | Required result |
+|------|-------|-----------------|
+| A | unpatched + PoC (×N) | exploited every run |
+| Control | unpatched + benign suite | golden baseline recorded |
+| B | patched + PoC (×N, + variants) | blocked every run; block logged |
+| C | patched + benign suite | matches baseline exactly (no false positives) |
+
+1. Run A and the control to establish that the bug is real and the baseline is stable.
+2. Run B. **Anti-overfitting depends on the patch shape** (see `patch-verification.md`):
+   a **conditional guard** (override/replace/block-list) gets the full **variant sweep** —
+   the variants are the ones ALREADY declared in `poc/exploit.py` (iterate `exploit.py variants`;
+   the matrix does this for you), reused through the SAME oracle — **do NOT write a new payload
+   generator or sender for the sweep** (principle 4); an **unconditional sanitize/state-reset**
+   patch (reads no input, mirrors a one-liner fix) cannot overfit to bytes, so set `SWEEP=0` and
+   make the *structural* argument + 1–2 representative triggers instead of a fuzz sweep.
+3. Run C; any deviation from the baseline (output, exit code, unacceptable latency) is a
+   false positive and fails the gate. For a conditional guard, benign traffic should NOT fire
+   (verdict stays ALLOW, no `[patch] FIRED` line); for an unconditional sanitize, benign traffic
+   *will* FIRE (harmlessly) — "no false block" is proven by matching the baseline, not by a no-fire signal.
+4. **Decision gate:** pass only if A=exploited, B=blocked (incl. variants), C=matches
+   baseline, control=stable. The mechanical matrix run (executing `verify_matrix*.sh`, the
+   variant sweep, and collecting `results.md`) MAY be delegated to an isolated verification
+   subagent to keep log churn out of the orchestrator — but this **decision gate stays with the
+   main agent**. If delegated, the verification subagent is told to **reuse `poc/exploit.py` +
+   the Phase-3 oracle verbatim** and is explicitly **forbidden from creating any new PoC/payload/
+   sender code** — if the existing exploit can't express a needed variant, it adds one to
+   `exploit.py`'s registry, it does not fork a new script.
+
+**Exit:** All four cells green, recorded in `verify/results.md`. Otherwise iterate on the
+patch (back to Phase 4 — **this consumes the shared `patch_attempt` budget**, see Retry &
+Escalation Policy) or escalate.
+
+### Phase 6: Report
+
+**Entry:** Phase 5 gate passed.
+
+**Actions:**
+1. Write `work/<CVE-ID>/REPORT.md`: summary, root cause (sink, CWE, invariant, fixing
+   commit), PoC (how to run), the bpftime patch (hook, mechanism, how to deploy),
+   verification results (the matrix), and **assumptions & residual risk** (binary-layout
+   coupling, TOCTOU, bpftime pre-1.0 status; recommend the upstream fix).
+2. Verify the report: every artifact path exists, no placeholder text remains, the matrix
+   results are quoted from `verify/results.md`.
+3. Report to the user: 2–3 bullet summary + the location of the artifacts.
+
+**Exit:** `REPORT.md` is complete and self-consistent; user has the summary.
+
+## Retry & Escalation Policy
+
+- Phase 3 retries a **maximum of 3 times** (its own budget). Count attempts explicitly.
+- Phase 4 has **one budget of 3 attempts**, tracked by a named counter `patch_attempt` (1..3)
+  persisted via `TaskUpdate` on the Phase-4 task (so it survives a context compaction). Increment
+  it on **every entry to Phase 4**: the first attempt, each internal Phase-4 retry
+  (build/attach/block failure), AND each Phase-5 kickback (a patch that blocks the PoC but fails
+  Cell C or the variant sweep and sends you back to Phase 4). The Phase 4↔5 loop **shares this one
+  budget** — the counter never resets on re-entry. When `patch_attempt` reaches 3 without a fully
+  green matrix, escalate.
+- On exhaustion, **stop** and escalate: present what was achieved, the exact blocker, and
+  what was tried. Use AskUserQuestion to offer: (a) continue best-effort with documented
+  gaps, (b) abort, or (c) take user guidance (e.g. a different hook point or version).
+- Never fake a green. A patch that does not verifiably block the PoC is not done —
+  escalate instead of claiming success.
+
+## Subagent Strategy
+
+- **Fixed subagent counts** (so orchestration never scales with codebase size): exactly 3
+  research subagents in Phase 1; one isolated subagent for Phase 3; one for Phase 4. Never
+  one-subagent-per-source or per-file.
+- Give every subagent a specific target, exactly what to find or do, the subagent type to
+  use (`general-purpose`), and a structured return format.
+- Research subagents run in parallel (independent). PoC and patch subagents run in
+  isolation so their build/debug churn does not pollute the orchestrator's context; they
+  return the artifact paths and a pass/fail summary.
+
+## bpftime Quick Reference
+
+**Do not hand-roll the patch — copy `{baseDir}/templates/patch/` into `work/<CVE>/patch/`
+and fill it in.** That scaffold (patch.bpf.c, patch_loader.c, attach_override.h, ufunc.bpf.h,
+Makefile, deploy.sh) is verified to build and attach end-to-end on **x86_64 and aarch64**.
+Verified facts (full detail + sources in `references/bpftime-patch-cookbook.md`):
+
+- Binaries in `/usr/local/bin` (`bpftime`, `bpftimetool`, `libbpftime-*.so`); `bpftool` at
+  `/usr/local/bpftool/bpftool`. The CLI default `~/.bpftime` does NOT exist — always pass
+  `-i /usr/local/bin`. Build headers/lib at `/usr/local/bpftool/libbpf/`; `vmlinux.h` is
+  generated from `/sys/kernel/btf/vmlinux` — **no bpftime source tree is needed**.
+- **Override is what neutralizes a function:** `SEC("uprobe")` (bare) + `bpf_override_return`,
+  attached by the loader with perf type **1008** (`attach_override.h`). A `SEC("uprobe/mod:fn")`
+  auto-attach is only a *plain* uprobe (observe) — it can't skip the call.
+- **Arch:** uprobe/uretprobe/override/ureplace work on x86_64 AND aarch64. bpftime's
+  syscall-tracepoint hooking is **x86_64-only** — on aarch64 you MUST use uprobe-override.
+- The Makefile auto-selects the arch (`-D__TARGET_ARCH_arm64` on aarch64, `_x86` on x86_64)
+  and uses the container's prebuilt libbpf + bpftool (fast). Attach success is a **positive
+  fd, not 0** — `attach_override.h` normalizes it (else the loader misreads success as error).
+
+```c
+// patch.bpf.c core (from templates): match args to the sink, fire on the invariant
+SEC("uprobe")                                  // override attach comes from the loader, not the SEC name
+int BPF_UPROBE(patch_entry, void *rec) {       // arg list matches the vulnerable function
+    if (rec == NULL) {                         // the root-cause invariant
+        bpf_override_return(ctx, -1);          // skip original; return a safe value
+    }
+    return 0;                                  // else: original runs unchanged
+}
+```
+
+```bash
+cd work/<CVE>/patch && make                    # -> patch.bpf.o, patch.skel.h, patch_loader
+./deploy.sh preload ../target/noasan/<binary> [args]  # non-ASan build; cleans shm, load + run
+# CRITICAL: always start from clean shm — a stale loader makes attach fail (EBADF):
+./deploy.sh clean       # kills loaders + rm /dev/shm/bpftime_maps_shm
+```
+
+## Rationalizations to Reject
+
+| Rationalization | Why it's wrong |
+|-----------------|----------------|
+| "I understand the CVE, skip building a PoC" | Without a reproducing PoC you can never prove the patch works. Reproduce first, always. |
+| "The PoC crashes — no need for a negative control" | A crash without a passing benign control could be a flaky harness. The benign-vs-malicious differential on the same build is the proof (grep the SPECIFIC sanitizer class at the sink so the crash is tied to the vuln, not the harness). |
+| "The patch blocks the PoC, we're done" | You must also verify benign behavior (Cell C) and root-cause variants (anti-overfitting). |
+| "Match the exploit's input bytes" | That is a negative signature; variants bypass it. Patch the invariant the upstream fix adds. |
+| "bpftime works like kernel eBPF" | No: userspace, in-process, override works on any function, `ufunc` exists — but you cannot rewrite scalar args. |
+| "A syscall filter will neutralize it" | bpftime syscall-tracepoint hooking is x86_64-only; on aarch64 it's a stub. Use a uprobe-override on the function instead. |
+| "bpf_prog_attach returned nonzero, so attach failed" | Under bpftime it returns a POSITIVE fd on success. Only a negative result is a failure (the template normalizes this). |
+| "The last run's bpftime state is fine to reuse" | A stale loader/agent or leftover `/dev/shm/bpftime_maps_shm` makes the attach fail (EBADF). Clean shm before every deploy. |
+| "I'll rewrite the attach/build scaffold to be cleaner" | The verified template is load-bearing; small rewrites broke the attach in testing. Copy `templates/patch/` and fill the TODOs. |
+| "NVD lists the affected versions, trust it" | NVD ranges lag and are often wrong. Validate against the upstream fixing commit and tags. |
+| "The vulnerable code is in this build, so the PoC should fire" | The path may be compiled out or off by default. Enable the required config/module and confirm it is active, or the PoC gives a false negative. |
+| "No crash means it's blocked" | Silent exploits (RCE, logic) need an explicit side-effect oracle, not absence of a crash. |
+| "It didn't crash, so there's no bug to patch" | Non-crashing memory corruption (silent OOB read/write, UAF-no-crash) is real and patchable. Instrument it with a bpftime observe-probe (`PATCH_MODE=observe`, technique 5) that computes the unsafe condition; a would-block verdict is the detector (`run.sh MODE=instrument`), and the same program flips to enforce. |
+| "The observe-probe fired, so it's exploited" | An observe-probe used as the oracle is circular unless it is SILENT on the fixed build AND on benign input. Require the vulnerable-vs-fixed/benign differential before trusting a would-block verdict as "exploited". |
+| "The benign tests pass, so the patch is attached" | A silent attach/verifier failure leaves the app unprotected while benign tests still pass. Assert attachment. |
+| "UBSan printed a warning but exited 0 — not reproduced" | UBSan recovers by default. Use `-fno-sanitize-recover=all` / `halt_on_error=1` before concluding. |
+| "The fix must block or skip a call" | Many fixes just RESET STATE (clear a flag / fix a size). Replicate that with a technique-3 memory write (`bpf_probe_write_user`, offset from `find_offsets.sh`/pahole), not a forced override. |
+| "I'll just use the offset from the advisory / a guess" | Extract struct field offsets from the `-g` binary YOU built (`find_offsets.sh`/pahole). Guessed offsets patch the wrong bytes. |
+| "The research says X, so it's true" | Recent-CVE research can be wrong or hallucinated. Confirm the fix by fetching the commit `.patch` directly; require 3-source convergence. |
+| "Build a full working exploit / RCE PoC" | You only need the MINIMAL reproducer that trips the bug (crash / ASan report / sentinel) to prove the patch — smaller, safer, and more deterministic than a weaponized heap-groom RCE. |
+| "Copy the public PoC as the exploit" | Derive the exploit from the fix diff + source (the mechanism). Public PoCs are for learning the required *config/reachability* only — copying one gives you bytes you don't understand and can't turn into variants. |
+| "The verify phase needs its own payload tool / request sender" | No. `poc/exploit.py` is the single source of truth — the sweep iterates `exploit.py variants` through the SAME oracle. A second generator/sender is the duplication that already bit this skill (make_input.py + gen_payload.py + send_req.py for one bug). |
+| "curl is fine for sending the exploit request" | curl percent-encodes the URL, so exact wire bytes (`%26`, `%20`) never reach the target and the trigger is masked. Send raw bytes via `exploit.py send` (raw socket). curl is fine only for benign paths. |
+| "I need to write a fresh variant generator for anti-overfitting" | The variants belong in `exploit.py`'s registry, defined in Phase 3. If you need a new one in Phase 5, ADD it to the registry — do not fork a new script. |
+
+## Reference Index
+
+| File | Content |
+|------|---------|
+| [references/vulnerability-research.md](references/vulnerability-research.md) | CVE root-cause methodology: authoritative sources, fixing-commit convergence, diff/bug-class heuristics, reachability |
+| [references/poc-reproduction.md](references/poc-reproduction.md) | Building an objective, reproducible PoC: pinning, sanitizers, the boolean oracle, negative control, determinism, gotchas |
+| [references/bpftime-patch-cookbook.md](references/bpftime-patch-cookbook.md) | Authoring/building/deploying a bpftime patch: attach types, override/ureplace/ufunc, syscall filters, local-install specifics, templates |
+| [references/patch-verification.md](references/patch-verification.md) | The A/B/C+control verification matrix, exploit-success oracles, anti-overfitting sweep, staged rollout, CI gate |
+| [templates/](templates/) | Copy-and-fill scaffolds for every produced file (see templates/README.md). The `patch/` build+deploy is verified on x86_64 and aarch64. Copy into `work/<CVE>/`. |
+| [tests/smoke.sh](tests/smoke.sh) | Fast pre-flight guardrail: shell syntax, `exploit.py` subcommands, patch builds across technique×mode, PATCH_MODE observe≠enforce + typo-safety. Run after editing any template. |
+
+## Success Criteria
+
+- [ ] Target confirmed userspace; working dir and toolchain set up (Phase 0)
+- [ ] Fixing commit, diff, and affected version range identified from authoritative sources (Phase 1)
+- [ ] Sink `file:function`, CWE bug class, and trigger invariant documented (Phase 2)
+- [ ] `poc/run.sh` reproduces (exit 0) AND negative control passes (Phase 3)
+- [ ] Patch builds, passes the verifier, attaches, and blocks the PoC (Phase 4)
+- [ ] Verification matrix all green: A exploited, B blocked incl. variants, C matches baseline (Phase 5)
+- [ ] `REPORT.md` complete with assumptions & residual risk; artifacts verified (Phase 6)
+- [ ] No faked greens — any unresolved blocker was escalated, not hidden
