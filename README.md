@@ -18,13 +18,16 @@ The plugin turns a **userspace CVE or bug write-up** into a **tested bpftime run
 
 ## Quick start
 
-### 1. Open the devcontainer
+### 1. Bring up the devcontainer
 
-The plugin runs its whole pipeline (build, PoC, deploy, verify) *inside* a container that already has the toolchain. Open this repo in VS Code and **Reopen in Container**, or use the devcontainer CLI:
+The plugin runs its whole pipeline (build, PoC, deploy, verify) *inside* a container that already has the toolchain. It is based on Trail of Bits' [`claude-code-devcontainer`](https://github.com/trailofbits/claude-code-devcontainer) (`devc`):
 
 ```sh
-devcontainer up --workspace-folder .
+devc up       # start the devcontainer
+devc shell    # open a shell inside it
 ```
+
+(Or use the raw devcontainer CLI: `devcontainer up --workspace-folder .`.)
 
 The container is launched with `--cap-add=NET_ADMIN --cap-add=NET_RAW` (needed for server/daemon targets) and installs, into fixed locations the plugin relies on (full breakdown in [docs/devcontainer.md](docs/devcontainer.md)):
 
@@ -55,6 +58,8 @@ Build a bpftime virtual patch for CVE-2019-12735.
 The plugin runs the 6-phase pipeline and drops every artifact — research, PoC, patch, verification, and a `REPORT.md` — under `work/<CVE-ID>/`.
 
 See the [plugin README](plugins/runtime-vuln-mitigation/README.md) for the pipeline, capabilities, and scope (what it does **not** do — e.g. kernel-space CVEs).
+
+For a step-by-step run, see the worked example: [docs/example-cve-2026-42945.md](docs/example-cve-2026-42945.md).
 
 ## License / status
 

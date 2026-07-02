@@ -8,6 +8,8 @@ Base image: `mcr.microsoft.com/devcontainers/base:ubuntu24.04`. Definition lives
 
 You need a container runtime (Docker / Podman / OrbStack) and either VS Code or the devcontainer CLI.
 
+This devcontainer is based on Trail of Bits' [`claude-code-devcontainer`](https://github.com/trailofbits/claude-code-devcontainer) (`devc`), so the quickest path is `devc up` then `devc shell` (equivalent to the VS Code / `devcontainer` CLI steps below).
+
 **VS Code:** open the repo and run **Dev Containers: Reopen in Container**.
 
 **CLI:**
