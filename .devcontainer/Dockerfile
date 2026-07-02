@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   llvm-dev \
   binutils-dev \
   dwarves \
+  file \
+  binutils \
   # Development libraries (headers)
   libelf-dev \
   zlib1g-dev \
@@ -37,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   nano \
   unzip \
   vim \
+  file \
   # Network tools (for security testing)
   dnsutils \
   ipset \
@@ -109,7 +112,7 @@ RUN mkdir -p /commandhistory /workspace /home/vscode/.claude /opt && \
 
 # Set environment variables
 ENV DEVCONTAINER=true
-ENV SHELL=/bin/zsh
+ENV SHELL=/bin/bash
 ENV EDITOR=nano
 ENV VISUAL=nano
 
@@ -136,16 +139,16 @@ RUN uv tool install ast-grep-cli
 # Install Oh My Zsh
 # renovate: datasource=github-releases depName=deluan/zsh-in-docker
 ARG ZSH_IN_DOCKER_VERSION=1.2.1
-RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
-  -p git \
-  -t lukerandall \
-  -x
+#RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
+#  -p git \
+#  -t lukerandall \
+#  -x
 
 # Copy zsh configuration
-COPY --chown=vscode:vscode .zshrc /home/vscode/.zshrc.custom
+#COPY --chown=vscode:vscode .zshrc /home/vscode/.zshrc.custom
 
 # Append custom zshrc to the main one
-RUN echo 'source ~/.zshrc.custom' >> /home/vscode/.zshrc
+#RUN echo 'source ~/.zshrc.custom' >> /home/vscode/.zshrc
 
 # Copy post_install script
 COPY --chown=vscode:vscode post_install.py /opt/post_install.py
