@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   llvm \
   llvm-dev \
   binutils-dev \
+  dwarves \
   # Development libraries (headers)
   libelf-dev \
   zlib1g-dev \

@@ -1,1 +1,4 @@
-./bpftime
+# Upstream bpftime source clones (not part of this repo; used only at runtime)
+bpftime/
+bpftime1/
+.DS_Store
