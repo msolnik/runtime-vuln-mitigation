@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "bpftime-local": {
+      "source": {
+        "source": "directory",
+        "path": "."
+      }
+    }
+  },
+  "enabledPlugins": {
+    "bpftime-cve-patch@bpftime-local": true
+  }
+}
