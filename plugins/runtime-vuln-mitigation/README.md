@@ -8,7 +8,7 @@ A Claude Code plugin that packages the [`runtime-vuln-mitigation` skill](skills/
 
 Invoke it when you want a **verified** runtime mitigation for a *known* userspace vulnerability:
 
-- You have a CVE id (e.g. `CVE-2019-12735`) or a bug write-up for a userspace app/library.
+- You have a CVE id (e.g. `CVE-2026-4294`) or a bug write-up for a userspace app/library.
 - The vulnerable path is reachable at a userspace function or a syscall the target makes (memory corruption, logic, type confusion, injection, traversal, DoS).
 - You need it *verified* — exploit blocked **and** benign behavior intact — not just written.
 
