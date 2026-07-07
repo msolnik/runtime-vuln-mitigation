@@ -18,7 +18,6 @@ The plugin turns a **userspace CVE or bug write-up** into a **tested bpftime run
 | [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json)   | Marketplace manifest (`msolnik-tools`) listing the plugin                                          |
 | [`plugins/runtime-vuln-mitigation/`](plugins/runtime-vuln-mitigation/) | The plugin — see its [README](plugins/runtime-vuln-mitigation/README.md)                           |
 | [`.devcontainer/`](.devcontainer/)                                     | Devcontainer that builds & installs the bpftime toolchain — [full setup doc](docs/devcontainer.md) |
-| `bpftime/`                                                             | Upstream bpftime source, vendored for reference (not required at runtime)                          |
 | `work/<CVE-ID>/`                                                       | Where the plugin writes all its artifacts (git-ignored)                                            |
 
 
