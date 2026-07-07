@@ -1,4 +1,4 @@
-# msolnik-tools
+# runtime-vuln-mitigation
 
 A local [Claude Code plugin marketplace](https://docs.claude.com/en/docs/claude-code/plugins) that ships one plugin — [`runtime-vuln-mitigation`](plugins/runtime-vuln-mitigation/) — together with a devcontainer that pre-builds the entire [bpftime](https://github.com/eunomia-bpf/bpftime) userspace-eBPF toolchain it depends on.
 
