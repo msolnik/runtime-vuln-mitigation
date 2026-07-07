@@ -4,7 +4,7 @@ A local [Claude Code plugin marketplace](https://docs.claude.com/en/docs/claude-
 
 The plugin turns a **userspace CVE or bug write-up** into a **tested bpftime runtime mitigation** (a "virtual patch"): it researches the flaw, reproduces it with a proof-of-concept, authors an eBPF program that neutralizes it in-process, and verifies the exploit is blocked without breaking the app — end to end, autonomously.
 
-> Virtual patch = a hook injected into the running process (via `LD_PRELOAD` or Frida) that enforces the same invariant the upstream fix adds, *without* recompiling or restarting the target. It is a **mitigation**, not a replacement for the upstream fix.
+> Virtual patch = a hook injected into the running process that enforces the same invariant the upstream fix adds, *without* recompiling or restarting the target. It is a **mitigation**, not a replacement for the upstream fix.
 
 > **Testing status:** This is a prototype. It has been exercised end-to-end **primarily** against a single target — **nginx / [CVE-2026-42945](docs/example-cve-2026-42945.md)** ("rift"). Other CVEs, bug classes, and targets are expected to work but are much less exercised; treat anything beyond that primary case as experimental.
 
